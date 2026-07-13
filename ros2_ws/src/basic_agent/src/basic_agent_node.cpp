@@ -46,7 +46,7 @@ private:
     double v_ref = msg->requested_cruising_speed;
     bool stopping = false;
 
-    if (msg->nr_trf_lights > 0 && s0 > 0.0 && s0 < STOP_HORIZON) {
+    if (msg->nr_trf_lights > 0 && s0 >= 0.0 && s0 < STOP_HORIZON) {
       int state = msg->trf_light_curr_state;
       if (state == 2 || state == 3) {
         stopping = true;

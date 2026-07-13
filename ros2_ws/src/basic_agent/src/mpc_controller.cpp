@@ -71,7 +71,7 @@ double MPCController::compute(double s0, double v0, double a0, double v_ref, dou
   Eigen::Vector3d x_ref;
 
   if (stopping) {
-    x_ref << 0.0, 0.0, 0.0;
+    x_ref << 2.0, 0.0, 0.0;
   } else {
     x_ref << s_ref, v_ref, 0.0;
   }
@@ -81,7 +81,7 @@ double MPCController::compute(double s0, double v0, double a0, double v_ref, dou
   buildQP(x0, x_ref, H, f, stopping);
 
   Eigen::SparseMatrix<double> H_sparse = H.sparseView();
-  Eigen::MatrixXd A_accel(N_, N_);
+  Eigen::MatrixXd C_accel(N_, N_);
   Eigen::MatrixXd M_accel(N_, 3);
 
   Eigen::SparseMatrix<double> A_con(2 * N_, N_);
@@ -89,7 +89,7 @@ double MPCController::compute(double s0, double v0, double a0, double v_ref, dou
   Eigen::VectorXd ub(2 * N_);
 
   for (int i = 0; i < N_; i++) {
-    A_accel.row(i) = C_.row(3 * i + 2);
+    C_accel.row(i) = C_.row(3 * i + 2);
     M_accel.row(i) = M_.row(3 * i + 2);
   }
 
@@ -100,8 +100,8 @@ double MPCController::compute(double s0, double v0, double a0, double v_ref, dou
     ub(i) = j_max_;
 
     for (int j = 0; j < N_; j++) {
-      if (A_accel(i, j) != 0.0) {
-        A_con.insert(N_ + i, j) = A_accel(i, j);
+      if (C_accel(i, j) != 0.0) {
+        A_con.insert(N_ + i, j) = C_accel(i, j);
       }
     }
     lb(N_ + i) = a_min_ - accel_offset(i);
