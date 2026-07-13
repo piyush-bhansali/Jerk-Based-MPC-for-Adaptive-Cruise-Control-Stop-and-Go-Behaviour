@@ -1,19 +1,36 @@
 import time
 from math import cos, sin
 
+import cv2
 import rclpy
 from rclpy.node import Node
+from cv_bridge import CvBridge
+from sensor_msgs.msg import Image
 from adas_msgs.msg import ScenarioMsg, ManoeuvreMsg
 
 from pydrivingsim import World, Vehicle, TrafficLight, TrafficCone, SuggestedSpeedSignal, Coin
+
+# TrafficLight.state (0=green 1=yellow 2=red) -> camera photo shown to the detector
+_TRAFFIC_LIGHT_IMAGE_PATHS = {
+    0: "imgs/traffic_signal_green.jpg",
+    1: "imgs/traffic_signal_yellow.jpg",
+    2: "imgs/traffic_signal_red.jfif",
+}
+
+# Camera sensing range [m] — must match STOP_HORIZON in basic_agent_node.cpp.
+# Beyond this the agent ignores the traffic light state anyway, so there's no
+# point publishing/detecting a frame for it.
+CAMERA_RANGE = 100.0
 
 
 class _AgentNode(Node):
     def __init__(self):
         super().__init__('simulator_agent')
         self.scenario_pub = self.create_publisher(ScenarioMsg, '/scenario', 10)
+        self.image_pub = self.create_publisher(Image, '/traffic_light_image', 10)
         self.create_subscription(ManoeuvreMsg, '/manoeuvre', self._manoeuvre_cb, 10)
         self.last_manoeuvre = None
+        self.bridge = CvBridge()
 
     def _manoeuvre_cb(self, msg):
         self.last_manoeuvre = msg
@@ -39,6 +56,11 @@ class Agent():
         if not rclpy.ok():
             rclpy.init()
         self._node = _AgentNode()
+
+        self._traffic_light_images = {
+            state: cv2.imread(path, cv2.IMREAD_COLOR)
+            for state, path in _TRAFFIC_LIGHT_IMAGE_PATHS.items()
+        }
 
     def compute(self):
         self.num_of_step += 1
@@ -127,6 +149,12 @@ class Agent():
 
         msg.nr_objs               = objId
         msg.adasis_speed_limit_nr = speedlimitId
+
+        if trafficlight and 0.0 <= trafficlightDist < CAMERA_RANGE:
+            img_msg = self._node.bridge.cv2_to_imgmsg(
+                self._traffic_light_images[trafficlight.state], encoding="bgr8")
+            img_msg.header.stamp = self._node.get_clock().now().to_msg()
+            self._node.image_pub.publish(img_msg)
 
         msg.nr_trf_lights = 0
         if trafficlight:

@@ -10,11 +10,13 @@ find_package(ament_cmake REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(adas_msgs REQUIRED)
 
 include_directories(include)
 
 add_executable(traffic_light_detector src/traffic_light_detector.cpp)
-ament_target_dependencies(traffic_light_detector rclcpp sensor_msgs OpenCV)
+ament_target_dependencies(traffic_light_detector rclcpp sensor_msgs adas_msgs OpenCV cv_bridge)
 install(TARGETS traffic_light_detector DESTINATION lib/${PROJECT_NAME})
 
 add_executable(HSV_detector src/HSV_detector.cpp)

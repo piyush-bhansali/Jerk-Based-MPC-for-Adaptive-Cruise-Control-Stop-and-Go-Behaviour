@@ -1,16 +1,22 @@
-#include <iostream>
 #include <opencv2/opencv.hpp>
+#include <cv_bridge/cv_bridge.hpp>
 
-using namespace std;
+#include "rclcpp/rclcpp.hpp"
+#include "sensor_msgs/msg/image.hpp"
+#include "adas_msgs/msg/traffic_light_state_msg.hpp"
+
 using namespace cv;
 
-enum class TrafficLightState { RED, YELLOW, GREEN, UNKNOWN };
+namespace {
 
-static string toString(TrafficLightState state) {
+// Must match the trf_light_curr_state / TrafficLightStateMsg convention.
+enum class TrafficLightState { UNKNOWN = 0, GREEN = 1, YELLOW = 2, RED = 3 };
+
+std::string toString(TrafficLightState state) {
   switch (state) {
-    case TrafficLightState::RED:    return "RED";
-    case TrafficLightState::YELLOW: return "YELLOW";
     case TrafficLightState::GREEN:  return "GREEN";
+    case TrafficLightState::YELLOW: return "YELLOW";
+    case TrafficLightState::RED:    return "RED";
     default:                        return "UNKNOWN";
   }
 }
@@ -20,15 +26,14 @@ struct BlobInfo {
   Rect bounding_box;
 };
 
-static BlobInfo bestCircularBlob(const Mat& raw_mask, double min_area,
-                                  double min_circularity,
-                                  Mat& cleaned_mask_out) {
+BlobInfo bestCircularBlob(const Mat& raw_mask, double min_area, double min_circularity) {
   Mat kernel = getStructuringElement(MORPH_ELLIPSE, Size(5, 5));
-  morphologyEx(raw_mask, cleaned_mask_out, MORPH_CLOSE, kernel);
-  morphologyEx(cleaned_mask_out, cleaned_mask_out, MORPH_OPEN, kernel);
+  Mat cleaned;
+  morphologyEx(raw_mask, cleaned, MORPH_CLOSE, kernel);
+  morphologyEx(cleaned, cleaned, MORPH_OPEN, kernel);
 
-  vector<vector<Point>> contours;
-  findContours(cleaned_mask_out, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+  std::vector<std::vector<Point>> contours;
+  findContours(cleaned, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
   BlobInfo best;
   for (const auto& contour : contours) {
@@ -52,11 +57,10 @@ static BlobInfo bestCircularBlob(const Mat& raw_mask, double min_area,
 
 struct DetectionResult {
   TrafficLightState state = TrafficLightState::UNKNOWN;
-  Mat mask;         // cleaned mask of the winning color; empty if UNKNOWN
-  Rect bounding_box; // valid only when state != UNKNOWN
+  Rect bounding_box;  // valid only when state != UNKNOWN
 };
 
-DetectionResult detectTrafficLightStateDebug(const Mat& bgr_image) {
+DetectionResult detectTrafficLightState(const Mat& bgr_image) {
   DetectionResult result;
   if (bgr_image.empty()) {
     return result;
@@ -69,18 +73,17 @@ DetectionResult detectTrafficLightStateDebug(const Mat& bgr_image) {
   Scalar lower_yellow(10, 135, 85), upper_yellow(103, 255, 255);
   Scalar lower_green(58, 76, 44), upper_green(94, 255, 255);
 
-  Mat mask_red_raw, mask_yellow_raw, mask_green_raw;
-  inRange(hsv, lower_red, upper_red, mask_red_raw);
-  inRange(hsv, lower_yellow, upper_yellow, mask_yellow_raw);
-  inRange(hsv, lower_green, upper_green, mask_green_raw);
+  Mat mask_red, mask_yellow, mask_green;
+  inRange(hsv, lower_red, upper_red, mask_red);
+  inRange(hsv, lower_yellow, upper_yellow, mask_yellow);
+  inRange(hsv, lower_green, upper_green, mask_green);
 
   double min_area = 0.0005 * bgr_image.rows * bgr_image.cols;
   double min_circularity = 0.6;
 
-  Mat mask_red_clean, mask_yellow_clean, mask_green_clean;
-  BlobInfo red = bestCircularBlob(mask_red_raw, min_area, min_circularity, mask_red_clean);
-  BlobInfo yellow = bestCircularBlob(mask_yellow_raw, min_area, min_circularity, mask_yellow_clean);
-  BlobInfo green = bestCircularBlob(mask_green_raw, min_area, min_circularity, mask_green_clean);
+  BlobInfo red    = bestCircularBlob(mask_red, min_area, min_circularity);
+  BlobInfo yellow = bestCircularBlob(mask_yellow, min_area, min_circularity);
+  BlobInfo green  = bestCircularBlob(mask_green, min_area, min_circularity);
 
   if (red.area == 0.0 && yellow.area == 0.0 && green.area == 0.0) {
     return result;
@@ -88,60 +91,86 @@ DetectionResult detectTrafficLightStateDebug(const Mat& bgr_image) {
 
   if (red.area >= yellow.area && red.area >= green.area) {
     result.state = TrafficLightState::RED;
-    result.mask = mask_red_clean;
     result.bounding_box = red.bounding_box;
   } else if (yellow.area >= red.area && yellow.area >= green.area) {
     result.state = TrafficLightState::YELLOW;
-    result.mask = mask_yellow_clean;
     result.bounding_box = yellow.bounding_box;
   } else {
     result.state = TrafficLightState::GREEN;
-    result.mask = mask_green_clean;
     result.bounding_box = green.bounding_box;
   }
 
   return result;
 }
 
-TrafficLightState detectTrafficLightState(const Mat& bgr_image) {
-  return detectTrafficLightStateDebug(bgr_image).state;
-}
+}  // namespace
 
-int main() {
-  struct TestCase { string name; string path; string expected; };
-  vector<TestCase> tests = {
-      {"red", "/home/piyush/ADAS/PyDrivingSim/imgs/traffic_signal_red.jfif", "RED"},
-      {"yellow", "/home/piyush/ADAS/PyDrivingSim/imgs/traffic_signal_yellow.jpg", "YELLOW"},
-      {"green", "/home/piyush/ADAS/PyDrivingSim/imgs/traffic_signal_green.jpg", "GREEN"},
-  };
+class TrafficLightDetectorNode : public rclcpp::Node {
+public:
+  TrafficLightDetectorNode() : Node("traffic_light_detector") {
+    image_sub_ = create_subscription<sensor_msgs::msg::Image>(
+      "/traffic_light_image", 10,
+      std::bind(&TrafficLightDetectorNode::image_callback, this, std::placeholders::_1));
 
-  for (const auto& test : tests) {
-    Mat image = imread(test.path, IMREAD_COLOR);
-    if (image.empty()) {
-      cout << test.path << " -> could not load image" << endl;
-      continue;
-    }
+    state_pub_ = create_publisher<adas_msgs::msg::TrafficLightStateMsg>("/traffic_light_state", 10);
+  }
 
-    DetectionResult result = detectTrafficLightStateDebug(image);
-    cout << test.path << " -> " << toString(result.state)
-         << " (expected " << test.expected << ")" << endl;
-
-    Mat original_resized;
-    resize(image, original_resized, Size(500, 500 * image.rows / image.cols));
-
-    if (!result.mask.empty()) {
-      Mat boxed = image.clone();
-      rectangle(boxed, result.bounding_box, Scalar(0, 255, 255), 8);
-      Mat boxed_resized;
-      resize(boxed, boxed_resized, original_resized.size());
-
-      imshow(test.name + " - detected " + toString(result.state), boxed_resized);
-    } else {
-      cout << "  no qualifying blob found, skipping mask/bbox output" << endl;
+  ~TrafficLightDetectorNode() override {
+    if (has_window_) {
+      destroyWindow(window_name_);
     }
   }
 
-  cout << "Press any key (with an image window focused) to close all windows..." << endl;
-  waitKey(0);
+private:
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::Publisher<adas_msgs::msg::TrafficLightStateMsg>::SharedPtr state_pub_;
+
+  bool has_window_ = false;
+  std::string window_name_;
+  TrafficLightState last_state_ = TrafficLightState::UNKNOWN;
+
+  void image_callback(const sensor_msgs::msg::Image::SharedPtr msg) {
+    cv_bridge::CvImageConstPtr cv_ptr;
+    try {
+      cv_ptr = cv_bridge::toCvShare(msg, "bgr8");
+    } catch (const cv_bridge::Exception & e) {
+      RCLCPP_ERROR(get_logger(), "cv_bridge conversion failed: %s", e.what());
+      return;
+    }
+
+    DetectionResult result = detectTrafficLightState(cv_ptr->image);
+
+    adas_msgs::msg::TrafficLightStateMsg out;
+    out.state = static_cast<int32_t>(result.state);
+    state_pub_->publish(out);
+
+    // Open a fresh window whenever the detected color changes; keep reusing it
+    // for as long as the same image (same light color) keeps being published.
+    if (!has_window_ || result.state != last_state_) {
+      if (has_window_) {
+        destroyWindow(window_name_);
+      }
+      window_name_ = "Traffic Light Detector - " + toString(result.state);
+      namedWindow(window_name_, WINDOW_NORMAL);
+      has_window_ = true;
+      last_state_ = result.state;
+    }
+
+    Mat display = cv_ptr->image.clone();
+    if (result.state != TrafficLightState::UNKNOWN) {
+      rectangle(display, result.bounding_box, Scalar(0, 255, 255), 8);
+    }
+
+    Mat resized;
+    resize(display, resized, Size(500, std::max(1, 500 * display.rows / display.cols)));
+    imshow(window_name_, resized);
+    waitKey(1);
+  }
+};
+
+int main(int argc, char * argv[]) {
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<TrafficLightDetectorNode>());
+  rclcpp::shutdown();
   return 0;
 }

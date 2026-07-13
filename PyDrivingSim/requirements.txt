@@ -1,3 +1,7 @@
 pygame>=2.6.1
 numpy>=1.26.0
+# opencv-python (cv2) and cv_bridge/rclpy are NOT pip dependencies here — they must come from
+# the system ROS + apt install (python3-opencv) via `venv --system-site-packages`. Do not add
+# opencv-python to this file: pip installing it drags in numpy 2.x, which breaks cv_bridge's
+# compiled extension (built against the system's numpy 1.x ABI).
 

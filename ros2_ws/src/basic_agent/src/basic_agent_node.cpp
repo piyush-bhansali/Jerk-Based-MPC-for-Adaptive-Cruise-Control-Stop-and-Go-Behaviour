@@ -1,6 +1,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "adas_msgs/msg/scenario_msg.hpp"
 #include "adas_msgs/msg/manoeuvre_msg.hpp"
+#include "adas_msgs/msg/traffic_light_state_msg.hpp"
 #include "basic_agent/mpc_controller.hpp"
 
 static constexpr int    MPC_N         = 60;    // 3 s horizon — enough to plan a full stop
@@ -26,13 +27,21 @@ public:
       "/scenario", 10,
       std::bind(&BasicAgentNode::scenario_callback, this, std::placeholders::_1));
 
+    traffic_light_state_sub_ = this->create_subscription<adas_msgs::msg::TrafficLightStateMsg>(
+      "/traffic_light_state", 10,
+      [this](const adas_msgs::msg::TrafficLightStateMsg::SharedPtr msg) {
+        vision_light_state_ = msg->state;
+      });
+
     publisher_ = this->create_publisher<adas_msgs::msg::ManoeuvreMsg>("/manoeuvre", 10);
   }
 
 private:
   rclcpp::Subscription<adas_msgs::msg::ScenarioMsg>::SharedPtr subscriber_;
+  rclcpp::Subscription<adas_msgs::msg::TrafficLightStateMsg>::SharedPtr traffic_light_state_sub_;
   rclcpp::Publisher<adas_msgs::msg::ManoeuvreMsg>::SharedPtr   publisher_;
   MPCController mpc_;
+  int32_t vision_light_state_ = 0;  // 0=Unknown until the detector's first message arrives
 
   void scenario_callback(const adas_msgs::msg::ScenarioMsg::SharedPtr msg)
   {
@@ -47,7 +56,7 @@ private:
     bool stopping = false;
 
     if (msg->nr_trf_lights > 0 && s0 >= 0.0 && s0 < STOP_HORIZON) {
-      int state = msg->trf_light_curr_state;
+      int state = vision_light_state_;
       if (state == 2 || state == 3) {
         stopping = true;
       } else if (state == 1) {
@@ -62,8 +71,8 @@ private:
     acc_cmd = std::clamp(acc_cmd, MPC_AMIN, MPC_AMAX);
 
     RCLCPP_INFO(this->get_logger(),
-      "s0=%.1f v0=%.2f a0=%.2f state=%d stopping=%d -> acc=%.3f",
-      s0, v0, a0, msg->trf_light_curr_state, (int)stopping, acc_cmd);
+      "s0=%.1f v0=%.2f a0=%.2f gt_state=%d vision_state=%d stopping=%d -> acc=%.3f",
+      s0, v0, a0, msg->trf_light_curr_state, vision_light_state_, (int)stopping, acc_cmd);
 
     manoeuvre.requested_acc          = acc_cmd;
     manoeuvre.requested_steer_whl_ag = 0.0;
