@@ -1,3 +1,4 @@
+import csv
 import time
 from math import cos, sin
 
@@ -21,6 +22,12 @@ _TRAFFIC_LIGHT_IMAGE_PATHS = {
 # Beyond this the agent ignores the traffic light state anyway, so there's no
 # point publishing/detecting a frame for it.
 CAMERA_RANGE = 100.0
+
+# Per-cycle tracking/actuation log consumed by plot_results.py.
+LOG_PATH = "agent_log.csv"
+LOG_FIELDS = [
+    "time", "v_actual", "v_ref", "a_actual", "a_requested", "pedal",
+]
 
 
 class _AgentNode(Node):
@@ -61,6 +68,8 @@ class Agent():
             state: cv2.imread(path, cv2.IMREAD_COLOR)
             for state, path in _TRAFFIC_LIGHT_IMAGE_PATHS.items()
         }
+
+        self._log_rows = []
 
     def compute(self):
         self.num_of_step += 1
@@ -178,10 +187,23 @@ class Agent():
         while self._node.last_manoeuvre is None and time.time() < deadline:
             rclpy.spin_once(self._node, timeout_sec=0.01)
 
+        requested_acc = 0.0
+        requested_steer = 0.0
         if self._node.last_manoeuvre:
             m = self._node.last_manoeuvre
-            pedal = self.__acc_to_pedal(m.requested_acc, float(v.state[3]))
-            self.action = (pedal, m.requested_steer_whl_ag)
+            requested_acc = m.requested_acc
+            requested_steer = m.requested_steer_whl_ag
+            pedal = self.__acc_to_pedal(requested_acc, float(v.state[3]))
+            self.action = (pedal, requested_steer)
+
+        self._log_rows.append({
+            "time": msg.ecu_up_time,
+            "v_actual": msg.v_lgt_fild,
+            "v_ref": msg.requested_cruising_speed,
+            "a_actual": msg.a_lgt_fild,
+            "a_requested": requested_acc,
+            "pedal": self.action[0],
+        })
 
     def __acc_to_pedal(self, acc, u):
         p = self.vehicle.vehicle
@@ -207,6 +229,11 @@ class Agent():
 
     def terminate(self):
         World().loop = 0
+        if self._log_rows:
+            with open(LOG_PATH, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+                writer.writeheader()
+                writer.writerows(self._log_rows)
 
     def get_action(self):
         return self.action
